@@ -1,0 +1,54 @@
+# --- legacy validation rig (vendor/sketchup-mcp is cloned by setup.ps1, not committed) ---
+vendor/
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+*.whl
+
+# --- build artifacts / distribution (tools/build.py regenerates these) ---
+dist/
+
+# --- machine-specific config (installers regenerate these) ---
+.mcp.json
+
+# --- SketchUp models: never commit real project files or backups ---
+test/*.skp
+test/*.skb
+*.skb
+
+# --- snapshot versioning: lives beside each model, can be 100s of MB, never committed ---
+.archie/
+**/.archie/
+
+# --- MCP call log: local activity record, can contain arbitrary eval_ruby code ---
+logs/
+**/mcp_calls.jsonl
+
+# --- secrets, just in case ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# --- OS cruft ---
+.DS_Store
+.DS_Store?
+Thumbs.db
+desktop.ini
+
+# --- editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Claude Code local IDE session config (tool permission grants, not project source) ---
+.claude/

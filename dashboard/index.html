@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Archie MCP Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a21; --border: #262b35; --text: #e6e9ef;
+    --dim: #8b92a3; --accent: #5b9dff; --ok: #4caf7d; --err: #e0605a; --mono: "SF Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f5f6f8; --panel: #ffffff; --border: #dde1e8; --text: #1a1d24; --dim: #6b7280; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 12px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .status { font-size: 12px; color: var(--dim); font-family: var(--mono); }
+  header .status.stale { color: var(--err); }
+  main { padding: 16px 20px; max-width: 1100px; margin: 0 auto; }
+  .row { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+  .row summary { list-style: none; cursor: pointer; padding: 8px 12px; display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12.5px; }
+  .row summary::-webkit-details-marker { display: none; }
+  .badge { padding: 1px 7px; border-radius: 4px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+  .badge.to_server { background: #5b9dff22; color: var(--accent); }
+  .badge.from_server { background: #4caf7d22; color: var(--ok); }
+  .time { color: var(--dim); }
+  .method { color: var(--text); font-weight: 600; }
+  .summary { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .row pre { margin: 0; padding: 10px 12px; border-top: 1px solid var(--border); font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  .empty { color: var(--dim); font-size: 13px; padding: 40px 0; text-align: center; }
+  .meta { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Archie · MCP call log</h1>
+  <span class="status" id="status">connecting…</span>
+</header>
+<main>
+  <div class="meta">Tailing <code>/logs/mcp_calls.jsonl</code>, polling every 1.5s. Newest first.</div>
+  <div id="feed"><div class="empty">No calls logged yet — waiting for the first MCP request.</div></div>
+</main>
+<script>
+const feed = document.getElementById('feed');
+const status = document.getElementById('status');
+let lastLen = -1;
+let openIds = new Set();
+
+function summarize(payload) {
+  if (typeof payload === 'string') return payload.slice(0, 140);
+  if (payload.method === 'tools/call' && payload.params) {
+    const name = payload.params.name || '?';
+    const args = JSON.stringify(payload.params.arguments || {});
+    return `${name}(${args.slice(0, 100)}${args.length > 100 ? '…' : ''})`;
+  }
+  if (payload.method) return payload.method;
+  if (payload.result !== undefined) return JSON.stringify(payload.result).slice(0, 140);
+  if (payload.error) return 'ERROR: ' + JSON.stringify(payload.error).slice(0, 140);
+  return JSON.stringify(payload).slice(0, 140);
+}
+
+function methodOf(payload) {
+  if (typeof payload === 'string') return '(raw)';
+  if (payload.method === 'tools/call' && payload.params) return payload.params.name || 'tools/call';
+  return payload.method || (payload.error ? 'error' : 'response');
+}
+
+function render(lines) {
+  if (lines.length === 0) {
+    feed.innerHTML = '<div class="empty">No calls logged yet — waiting for the first MCP request.</div>';
+    return;
+  }
+  const rows = lines.slice().reverse().map((entry, i) => {
+    const id = lines.length - i;
+    const t = new Date(entry.ts * 1000).toLocaleTimeString();
+    const open = openIds.has(id) ? 'open' : '';
+    return `<details class="row" data-id="${id}" ${open}>
+      <summary>
+        <span class="badge ${entry.direction}">${entry.direction === 'to_server' ? '→ call' : '← reply'}</span>
+        <span class="time">${t}</span>
+        <span class="method">${methodOf(entry.payload)}</span>
+        <span class="summary">${summarize(entry.payload).replace(/</g, '&lt;')}</span>
+      </summary>
+      <pre>${JSON.stringify(entry.payload, null, 2).replace(/</g, '&lt;')}</pre>
+    </details>`;
+  });
+  feed.innerHTML = rows.join('');
+  feed.querySelectorAll('details').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const id = d.dataset.id;
+      if (d.open) openIds.add(id); else openIds.delete(id);
+    });
+  });
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/logs/mcp_calls.jsonl?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status);
+    const text = await res.text();
+    if (text.length !== lastLen) {
+      lastLen = text.length;
+      const lines = text.split('\n').filter(Boolean).map(l => {
+        try { return JSON.parse(l); } catch { return null; }
+      }).filter(Boolean);
+      render(lines);
+    }
+    status.textContent = 'live · last checked ' + new Date().toLocaleTimeString();
+    status.classList.remove('stale');
+  } catch (e) {
+    status.textContent = 'log file not found yet (' + e.message + ')';
+    status.classList.add('stale');
+  }
+}
+
+poll();
+setInterval(poll, 1500);
+</script>
+</body>
+</html>
