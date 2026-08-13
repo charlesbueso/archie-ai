@@ -15,7 +15,7 @@ require_relative 'versioning'
 
 module Archie
   class Server
-    VERSION = '0.4.0'.freeze
+    VERSION = '0.4.1'.freeze
 
     @instance = nil
     class << self
