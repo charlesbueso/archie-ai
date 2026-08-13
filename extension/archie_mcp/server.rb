@@ -10,11 +10,12 @@ require 'json'
 require_relative 'config'
 require_relative 'introspect'
 require_relative 'edit'
+require_relative 'create'
 require_relative 'versioning'
 
 module Archie
   class Server
-    VERSION = '0.3.0'.freeze
+    VERSION = '0.4.0'.freeze
 
     @instance = nil
     class << self
@@ -146,6 +147,12 @@ module Archie
       when 'locate'           then Introspect.locate(params)
       when 'resize_opening'   then Edit.resize_opening(params)
       when 'set_slab_thickness' then Edit.set_slab_thickness(params)
+      when 'make_unique'      then Edit.make_unique(params)
+      when 'transform_component' then Edit.transform_component(params)
+      when 'create_box'       then Create.box(params)
+      when 'create_slab'      then Create.slab(params)
+      when 'create_wall'      then Create.wall(params)
+      when 'create_opening'   then Create.opening(params)
       when 'get_model_ref'    then Versioning.get_model_ref(params)
       when 'save_copy'        then Versioning.save_copy(params)
       when 'save_model'       then Versioning.save_model(params)

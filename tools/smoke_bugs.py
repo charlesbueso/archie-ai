@@ -15,6 +15,7 @@ Run: .venv/Scripts/python.exe tools/smoke_bugs.py [--full] [--port 9876]
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import socket
 import sys
@@ -73,9 +74,16 @@ def expect_raises(label, fn, needle=""):
 
 # --------------------------------------------------------------- read-only --
 
+def expected_version() -> str:
+    txt = (ROOT / "server" / "archie_mcp" / "__init__.py").read_text(encoding="utf-8")
+    return re.search(r'__version__ = "([^"]+)"', txt).group(1)
+
+
 def read_only_suite():
     info = call("archie_info")
-    check("extension v0.3.0", info["version"] == "0.3.0", info["version"])
+    want = expected_version()
+    check(f"extension v{want}", info["version"] == want,
+          f"got {info['version']}")
 
     ref = call("get_model_ref")
     print(f"     model: {Path(ref['path']).name or '(unsaved)'}")
@@ -258,12 +266,99 @@ def full_suite(allops):
             pass
 
 
+def creation_suite():
+    """v0.4 capabilities. Creates geometry far from the building, verifies it,
+    then erases it, so the open model is left exactly as found."""
+    info = call("archie_info")
+    if not info.get("dev_mode"):
+        print("   (skipped: needs dev_mode for cleanup)")
+        return
+    made = []
+    try:
+        b = call("create_box", {"origin": [500, 0, 0], "size": [2, 3, 1.5],
+                                "name": "SELFTEST_BOX"})
+        made.append(b["pid"])
+        check("create_box", b["size"] == [2.0, 3.0, 1.5] and b["verified"], b["size"])
+
+        s = call("create_slab", {"origin": [500, 10], "size": [5, 4], "thickness": 0.2,
+                                 "z_level": 3.0, "datum": "top", "name": "SELFTEST_SLAB"})
+        made.append(s["pid"])
+        check("create_slab datum=top puts FFL at z_level",
+              abs(s["z_top"] - 3.0) < 0.001 and abs(s["z_bottom"] - 2.8) < 0.001,
+              f"{s['z_bottom']}..{s['z_top']}")
+
+        w = call("create_wall", {"start": [500, 20], "end": [506, 24], "height": 2.7,
+                                 "thickness": 0.2, "name": "SELFTEST_DIAG"})
+        made.append(w["pid"])
+        check("create_wall handles non-axis-aligned", abs(w["length"] - 7.211) < 0.01,
+              f"len={w['length']}")
+
+        w2 = call("create_wall", {"start": [500, 30], "end": [506, 30], "height": 2.7,
+                                  "thickness": 0.2, "name": "SELFTEST_STRAIGHT"})
+        made.append(w2["pid"])
+        o = call("create_opening", {"wall_pid": w2["pid"], "width": 1.5, "height": 1.2,
+                                    "sill": 0.9, "position": 3.0})
+        check("create_opening cuts a verified hole",
+              o["verified"] and abs(o["width"] - 1.5) < 0.02, f"{o['width']}x{o['height']}")
+        expect_raises("create_opening refuses oversize with the fitting size",
+                      lambda: call("create_opening", {"wall_pid": w2["pid"], "width": 99,
+                                                      "height": 1.0}),
+                      "widest that fits")
+
+        # the ledge case: grow one axis while the anchored end stays put
+        t = call("transform_component", {"pid": b["pid"], "set_size": [None, 6, None],
+                                         "anchor": ["center", "min", "center"]})
+        check("transform_component set_size + anchor",
+              abs(t["after"]["size"][1] - 6.0) < 0.01
+              and t["before"]["min"][1] == t["after"]["min"][1],
+              f"y {t['before']['size'][1]}->{t['after']['size'][1]}, anchored end fixed")
+        expect_raises("transform_component refuses extreme scale",
+                      lambda: call("transform_component", {"pid": b["pid"],
+                                                           "scale": [5000, 1, 1]}),
+                      "extreme scale")
+    finally:
+        if made:
+            code = ("m=Sketchup.active_model; m.start_operation('selftest cleanup',true); "
+                    + "; ".join(f"c=Archie::Util.find_container(m,{p}); "
+                                f"c[:entity].erase! if c && c[:entity].valid?" for p in made)
+                    + "; m.commit_operation; 'ok'")
+            try:
+                rb(code)
+                print(f"   (cleaned up {len(made)} test objects)")
+            except RuntimeError as e:
+                print(f"   (cleanup failed: {e})")
+
+
+def remedies_suite(allops):
+    """A blocked edit must offer options, not just refuse."""
+    target = next((o for o in allops["openings"]
+                   if o["kind"] in ("DOOR", "WINDOW") and not o["shared"]
+                   and o["width"] > 0.3), None)
+    if not target:
+        print("   (no suitable opening found)")
+        return
+    huge = round(target["width"] * 4, 2)
+    dry = call("resize_opening", {"id": target["id"], "width": huge,
+                                  "height": target["height"], "dry_run": True})
+    lim = dry.get("limits", {})
+    check("blocked resize reports real limits",
+          "max_width_here" in lim and "limited_by" in lim,
+          f"max={lim.get('max_width_here')} by={lim.get('limited_by')}")
+    rem = dry.get("remedies", [])
+    check("blocked resize offers concrete remedies", len(rem) >= 2,
+          f"{[r['action'] for r in rem]}")
+
+
 def main():
     global _sock, _file
     _sock = socket.create_connection(("127.0.0.1", PORT), timeout=20)
     _file = _sock.makefile("r", encoding="utf-8")
     print(f"== read-only suite (port {PORT})")
     allops = read_only_suite()
+    print("\n== remedies (blocked edits must propose options)")
+    remedies_suite(allops)
+    print("\n== creation primitives + transform (v0.4)")
+    creation_suite()
     print("\n== projects suite (sqlite, no SketchUp)")
     projects_suite()
     if FULL:

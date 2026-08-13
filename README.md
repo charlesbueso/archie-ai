@@ -28,7 +28,7 @@ Archie extension (Ruby, extension/)   runs inside SketchUp, autostarts
 | `test/` | Validation-phase assets: models, TEST.md protocol, CASA knowledge base |
 | `vendor/`, `setup.ps1`, `SETUP.md` | **Legacy** validation rig (upstream sketchup-mcp) — superseded by the above |
 
-## The 21 tools
+## The 27 tools
 
 - **System**: `health_check`
 - **Read**: `get_model_info` (slabs, storeys, structure), `list_openings`
@@ -36,7 +36,11 @@ Archie extension (Ruby, extension/)   runs inside SketchUp, autostarts
   unfamiliar model), `get_selection`, `locate` (point the camera at an
   element and select it)
 - **Edit** (auto-snapshot first, verified *inside* the undo operation and
-  rolled back if verification fails): `resize_opening`, `set_slab_thickness`
+  rolled back if verification fails): `resize_opening`, `set_slab_thickness`,
+  `transform_component` (move/scale/set-size anything, with a per-axis
+  anchor), `make_unique` (detach instanced geometry so it can be edited)
+- **Create** (primitives, not generators — a pool is a composition of these):
+  `create_box`, `create_slab`, `create_wall`, `create_opening`
 - **Versions**: `create_snapshot`, `list_versions`, `restore_version`,
   `save_model`
 - **Projects**: `create_client`, `delete_client`, `create_project`,
@@ -80,6 +84,20 @@ Learned the hard way against a real 85 MB client model — see
 11. Flag anomalies, never omit them. A degenerate slab dropped from the
     inventory became invisible orphaned geometry the user could not find or
     repair (BUG-04).
+12. **`definition.bounds` is stale until the operation commits.** Anything
+    measured between `start_operation` and `commit_operation` must read actual
+    vertex positions (`Util.world_bbox_live`) — the cached bbox reports
+    pre-edit geometry and rolls back correct edits.
+13. `transform!` changes the entity's own transformation, so a world transform
+    captured before it is stale. Re-resolve the container before measuring.
+14. A selection tolerance must be smaller than the feature it selects. A 20mm
+    plane tolerance on a 14mm slab grabs both faces and moves them together,
+    changing nothing.
+15. `make_unique` on a node does NOT uniquify the geometry nested inside it —
+    those children stay shared with the original's children. Detaching for
+    editing means walking the subtree too.
+16. When an edit can't be done, return the limit and concrete remedies, not
+    just a refusal. An architect expects "here's what we'd have to change".
 
 ## Dev quickstart
 

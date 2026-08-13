@@ -149,18 +149,82 @@ def locate(pid: int = 0, opening_id: str = "", select: bool = True,
 
 @mcp.tool()
 @logged
+def make_unique(pid: int, deep: bool = True) -> dict:
+    """Make instanced geometry independently editable.
+
+    Downloaded and library models are almost entirely component instances —
+    editing one would change every copy, so Archie refuses until it is made
+    unique. This does that: it uniquifies the whole ancestor chain AND the
+    nested geometry inside, then returns the element's NEW pid (copying a
+    definition re-issues persistent ids, so the old pid is dead — always use
+    `new_pid` afterwards).
+
+    The edit tools call this automatically when needed, so reach for it
+    directly only when the user wants to detach something up front. Tell the
+    user afterwards how many sibling copies were left untouched."""
+    return bridge().send("make_unique", {"pid": pid, "deep": deep}, timeout=600)
+
+
+@mcp.tool()
+@logged
+def transform_component(pid: int, move: list = [], scale: list = [],
+                        set_size: list = [], anchor: str = "center",
+                        auto_unique: bool = True) -> dict:
+    """Move, scale or resize ANY container — the general-purpose editor for
+    geometry that is neither an opening nor a slab: ledges, sills, parapets,
+    furniture, massing blocks.
+
+    - `move`: [dx, dy, dz] metres.
+    - `set_size`: [x, y, z] target size in metres; pass null for axes to leave
+      alone (e.g. [null, 0.6, null] sets only the Y extent).
+    - `scale`: [sx, sy, sz] multipliers, as an alternative to set_size.
+    - `anchor`: which part stays put — "min", "center" or "max", or a
+      per-axis list like ["center", "min", "center"].
+
+    ANCHOR IS THE IMPORTANT ONE. "Make this ledge stick out 20cm further"
+    means: anchor the edge that meets the wall and grow the other. Get the
+    current bounds from get_model_info or locate first, decide which end must
+    not move, and anchor there — otherwise the element grows in both
+    directions and detaches from the building.
+
+    Shared geometry is made unique automatically (reported in `made_unique`);
+    say so to the user, since the other copies keep their original form."""
+    params: dict = {"pid": pid, "anchor": anchor, "auto_unique": auto_unique}
+    if move:
+        params["move"] = move
+    if scale:
+        params["scale"] = scale
+    if set_size:
+        params["set_size"] = set_size
+    return bridge().send("transform_component", params, timeout=600)
+
+
+@mcp.tool()
+@logged
 def resize_opening(opening_id: str, width: float, height: float,
-                   sill: float = -1.0, dry_run: bool = False) -> dict:
-    """Resize a door or window opening to width x height meters, keeping it
-    centered on its current position. `opening_id` comes from list_openings.
+                   sill: float = -1.0, dry_run: bool = False,
+                   auto_unique: bool = True) -> dict:
+    """Resize a door or window opening to width x height metres, keeping it
+    centred on its current position. `opening_id` comes from list_openings.
     `sill` = bottom height above that storey's finished floor (pass -1 to
-    keep the current sill; doors want sill 0). Moves the full stepped-frame
-    region atomically, holds mullions of adjacent lights, clamps to the wall
-    shell so a floor-level sill lands cleanly. Auto-snapshots first. Use
-    dry_run=true to preview the plan without touching geometry. The result
-    reports `achieved` dimensions and `verified` — always relay those."""
+    keep the current sill; doors want sill 0).
+
+    WHEN IT DOESN'T FIT, DO NOT STOP THERE. The result carries `limits`
+    (max_width_here, max_height_here, limited_by, free_span) and a `remedies`
+    list of concrete options — accept the maximum, extend the host wall, move
+    a neighbouring opening, or slide this one along the wall. Present those
+    options with their real numbers and consequences and ask the user which
+    they want. An architect expects "here's what we'd have to change", not
+    "can't do it".
+
+    Auto-snapshots first, verifies INSIDE the undo operation, and rolls the
+    model back if the result doesn't match — so a failure leaves nothing
+    half-applied. Use dry_run=true to preview; the preview reports the same
+    clamped numbers the real edit would produce. Always relay `achieved` and
+    `verified`."""
     snap = versioning.auto_snapshot("resize_opening") if not dry_run else None
-    params = {"id": opening_id, "width": width, "height": height, "dry_run": dry_run}
+    params = {"id": opening_id, "width": width, "height": height,
+              "dry_run": dry_run, "auto_unique": auto_unique}
     if sill is not None and sill >= 0:
         params["sill"] = sill
     result = bridge().send("resize_opening", params, timeout=600)
@@ -171,17 +235,99 @@ def resize_opening(opening_id: str, width: float, height: float,
 
 @mcp.tool()
 @logged
-def set_slab_thickness(slab_pid: int, thickness: float, datum: str = "top") -> dict:
-    """Change a slab (losa) to `thickness` meters. `slab_pid` comes from
+def set_slab_thickness(slab_pid: int, thickness: float, datum: str = "top",
+                       auto_unique: bool = True) -> dict:
+    """Change a slab (losa) to `thickness` metres. `slab_pid` comes from
     get_model_info's slabs list. datum='top' keeps the finished-floor level
     fixed and moves the soffit (almost always what an architect means —
     walls, doors and stairs keep their levels); datum='bottom' keeps the
-    soffit and moves the top. Auto-snapshots first; reports before/after and
-    `verified`."""
+    soffit and moves the top.
+
+    Shared slabs are made unique automatically so they become editable;
+    mention that to the user, since other copies keep their original
+    thickness — and offer to apply the change to those too if that's what
+    they meant. Auto-snapshots first, verifies inside the undo operation and
+    rolls back on mismatch."""
     snap = versioning.auto_snapshot("set_slab_thickness")
     result = bridge().send("set_slab_thickness",
-                           {"pid": slab_pid, "thickness": thickness, "datum": datum},
+                           {"pid": slab_pid, "thickness": thickness, "datum": datum,
+                            "auto_unique": auto_unique},
                            timeout=600)
+    if snap:
+        result["snapshot"] = snap
+    return result
+
+
+# ------------------------------------------------------------- creation ----
+# Primitives rather than high-level generators: a pool, planter, parapet or
+# massing study is a composition of these, so the agent can improvise shapes
+# nobody hard-coded.
+
+@mcp.tool()
+@logged
+def create_box(origin: list, size: list, name: str = "") -> dict:
+    """Create a rectangular solid. `origin` = [x, y, z] of its lowest corner,
+    `size` = [dx, dy, dz], all in metres. The building block for anything
+    without a dedicated tool — pool basins, planters, steps, massing studies,
+    counters.
+
+    Before placing anything, get the model's bounds from get_model_info so it
+    lands in a sensible spot, and CONFIRM the position and size with the user
+    rather than guessing — 'in the back garden' needs a coordinate before it
+    means anything. Afterwards, call locate() so they can see where it went."""
+    return bridge().send("create_box", {"origin": origin, "size": size,
+                                        "name": name}, timeout=600)
+
+
+@mcp.tool()
+@logged
+def create_slab(origin: list, size: list, thickness: float, z_level: float,
+                datum: str = "top", name: str = "") -> dict:
+    """Create a horizontal slab (losa). `origin` = [x, y] of a corner,
+    `size` = [dx, dy], all metres. `z_level` with datum='top' means z_level is
+    the finished floor and the slab hangs below it (the usual architectural
+    reading); datum='bottom' means it sits on z_level.
+
+    Use get_model_info's `storeys` to match an existing finished-floor level
+    rather than inventing one."""
+    return bridge().send("create_slab", {"origin": origin, "size": size,
+                                         "thickness": thickness, "z_level": z_level,
+                                         "datum": datum, "name": name}, timeout=600)
+
+
+@mcp.tool()
+@logged
+def create_wall(start: list, end: list, height: float, thickness: float = 0.15,
+                z_base: float = 0.0, name: str = "") -> dict:
+    """Create a wall running between two plan points, centred on that line.
+    `start`/`end` = [x, y] in metres; any orientation works, not just
+    axis-aligned. `z_base` is the level it stands on — match an existing
+    finished floor from get_model_info's `storeys`.
+
+    Cut doors and windows into it afterwards with create_opening."""
+    return bridge().send("create_wall", {"start": start, "end": end, "height": height,
+                                         "thickness": thickness, "z_base": z_base,
+                                         "name": name}, timeout=600)
+
+
+@mcp.tool()
+@logged
+def create_opening(wall_pid: int, width: float, height: float, sill: float = 0.0,
+                   position: float = -1.0, auto_unique: bool = True) -> dict:
+    """Cut a NEW door or window through an existing wall (resize_opening only
+    changes ones that already exist). `sill` is measured from the WALL'S OWN
+    BASE, and `position` is the opening's centre measured along the wall from
+    its lower-coordinate end (omit to centre it).
+
+    Works on axis-aligned walls. If the opening cannot fit, the error states
+    the widest/tallest that would — offer that to the user instead of
+    stopping. Verifies the hole really cut through and rolls back if not."""
+    params: dict = {"wall_pid": wall_pid, "width": width, "height": height,
+                    "sill": sill, "auto_unique": auto_unique}
+    if position is not None and position >= 0:
+        params["position"] = position
+    snap = versioning.auto_snapshot("create_opening")
+    result = bridge().send("create_opening", params, timeout=600)
     if snap:
         result["snapshot"] = snap
     return result

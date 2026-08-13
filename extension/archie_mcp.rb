@@ -9,7 +9,7 @@ module Archie
     ex = SketchupExtension.new('Archie MCP', 'archie_mcp/main')
     ex.description = 'Typed MCP bridge for architectural editing with Claude. ' \
                      'Introspection, opening edits, slab edits, versioning.'
-    ex.version     = '0.3.0'
+    ex.version     = '0.4.0'
     ex.creator     = 'Archie'
     Sketchup.register_extension(ex, true)
     file_loaded(__FILE__)

@@ -55,6 +55,42 @@ module Archie
       containers(model).find { |c| c[:pid] == pid }
     end
 
+    # The world transform of a container's PARENT. transform! applies in the
+    # parent's coordinate space, so anchors and vectors must be converted
+    # into it before use.
+    def self.parent_transform(cont)
+      cont[:transform] * cont[:entity].transformation.inverse
+    end
+
+    # Positional path to an entity: [i0, i1, ...] indices into successive
+    # Entities collections. Needed by make_unique — copying a definition gives
+    # its children brand-new persistent_ids, so a pid cannot be used to
+    # re-find anything after a parent has been uniquified, but index position
+    # survives because a definition copy preserves order.
+    def self.index_path(model, pid, max_depth = 10)
+      result = nil
+      walk = nil
+      walk = lambda do |ents, trail, depth|
+        ents.to_a.each_with_index do |e, i|
+          return if result
+          next unless e.is_a?(Sketchup::Group) || e.is_a?(Sketchup::ComponentInstance)
+          if e.persistent_id == pid
+            result = trail + [i]
+            return
+          end
+          walk.call(e.definition.entities, trail + [i], depth + 1) if depth < max_depth
+        end
+      end
+      walk.call(model.entities, [], 0)
+      result
+    end
+
+    # world [x,y,z] metres -> Geom::Point3d in the given space
+    def self.pt(xyz, space_inverse = nil)
+      p = Geom::Point3d.new(to_in(xyz[0]), to_in(xyz[1]), to_in(xyz[2]))
+      space_inverse ? p.transform(space_inverse) : p
+    end
+
     # World-space bbox of a container as {min:[m], max:[m], size:[m]}.
     def self.world_bbox(entity, wtr)
       bb = entity.definition.bounds
@@ -68,6 +104,28 @@ module Archie
         max:  [to_m(xs.max), to_m(ys.max), to_m(zs.max)].map { |v| r(v) },
         size: [to_m(xs.max - xs.min), to_m(ys.max - ys.min), to_m(zs.max - zs.min)].map { |v| r(v) }
       }
+    end
+
+    # World bbox computed from ACTUAL vertex positions instead of
+    # definition.bounds.
+    #
+    # definition.bounds is cached and does NOT refresh until the enclosing
+    # operation commits. Since verification now runs *inside* the operation
+    # (so a bad edit can be rolled back), reading the cached bbox reports the
+    # pre-edit geometry and rolls back perfectly good edits. Any check that
+    # happens between start_operation and commit_operation must use this.
+    def self.world_bbox_live(entity, wtr)
+      xs = []; ys = []; zs = []
+      deep_vertex_groups(entity, wtr).each do |g|
+        g[:verts].each do |v|
+          p = v.position.transform(g[:transform])
+          xs << p.x; ys << p.y; zs << p.z
+        end
+      end
+      return world_bbox(entity, wtr) if xs.empty?
+      { min:  [to_m(xs.min), to_m(ys.min), to_m(zs.min)].map { |v| r(v) },
+        max:  [to_m(xs.max), to_m(ys.max), to_m(zs.max)].map { |v| r(v) },
+        size: [to_m(xs.max - xs.min), to_m(ys.max - ys.min), to_m(zs.max - zs.min)].map { |v| r(v) } }
     end
 
     # All unique vertices of a definition's top-level edges.

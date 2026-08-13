@@ -1,6 +1,6 @@
 [project]
 name = "archie-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Archie - typed MCP server for architectural editing in SketchUp, with snapshot versioning and client/project management"
 requires-python = ">=3.10"
 dependencies = [

@@ -29,7 +29,7 @@ con tu propia cuenta de Claude, y 10 minutos.
    - Mac: `bash install/install-mac.sh`
    - Windows: clic derecho en `install\install-windows.ps1` → *Run with PowerShell*
 4. **Instala la extensión en SketchUp**: Window → Extension Manager →
-   *Install Extension* → elige `archie_sketchup_v0.3.0.rbz` de la carpeta.
+   *Install Extension* → elige `archie_sketchup_v0.4.0.rbz` de la carpeta.
    Si lo rechaza: Window → Preferences → Extensions → política *Unrestricted*.
    **Reinicia SketchUp.** El servidor de Archie arranca solo.
 5. **Cierra Claude Desktop POR COMPLETO** (icono de la bandeja / barra de menú
@@ -113,7 +113,7 @@ is just a fast, repeatable script to prove everything's wired up.
    conversation: *"Open the Acme project"* — Claude reads back the project
    brief automatically.
 
-### What Archie can do today (v0.3)
+### What Archie can do today (v0.4)
 
 - **Read**: model survey (slabs/losas, storey levels, structure), door &
   window inventory with sizes and sill heights, current selection.
@@ -131,11 +131,24 @@ is just a fast, repeatable script to prove everything's wired up.
 - **Projects**: register clients and projects ("open the Juárez house")
   with a brief Claude reads for context. Accent-insensitive, so *Juarez*
   finds *Juárez*.
+- **Move, scale and resize anything**: not just doors and windows — a ledge, a
+  sill, a parapet, a block. Say *"make that ledge stick out 20cm further"* and
+  it grows from the end you mean, staying attached to the wall.
+- **Build new geometry**: boxes, slabs, walls (any orientation), and cutting
+  new doors/windows into existing walls. A pool is a handful of boxes, so
+  Claude can compose one without a dedicated tool.
+- **Works on downloaded models**: library models are almost entirely repeated
+  component instances, which normally can't be edited without changing every
+  copy. Archie detaches the one you're working on automatically and tells you
+  how many siblings it left alone.
+- **Offers options instead of refusing**: when a window won't fit, you get the
+  real numbers — *"the wall allows 0.67m; I can extend the wall 1.67m, move
+  the neighbouring window, or slide this one along"* — and pick.
 - **Tells you about problems it finds**: degenerate slabs, openings below
   floor level and other anomalies are reported, never quietly skipped.
 
-Not yet: moving walls, creating new geometry, editing instanced/shared
-components (Archie refuses rather than silently changing every copy).
+Not yet: adding a whole storey in one step, and walls that aren't
+axis-aligned when *cutting openings* (creating angled walls is fine).
 
 ### Troubleshooting
 
@@ -145,7 +158,8 @@ components (Archie refuses rather than silently changing every copy).
 | `archie` missing in Claude Desktop | You didn't FULLY quit Claude Desktop (tray/menu-bar → Quit), or step 3 didn't run. |
 | "eval_ruby is disabled" | Correct — that developer tool is off for beta. The typed tools cover the supported operations. |
 | Port conflict / second copy of SketchUp | Only one SketchUp can hold the port. Edit `~/Archie/config.json` → `"port"` and restart both SketchUp and Claude Desktop. |
-| Edits refused: "shared geometry" | The element is a component used multiple times; Archie protects you from editing all copies at once. Make it unique in SketchUp first. |
+| "This was 1 of N copies, I made it independent" | Normal on downloaded models. Archie detached this one so your edit didn't change all N. If you *wanted* all of them changed, say so and it will apply to the rest. |
+| An edit says it was "rolled back" | Deliberate: the result didn't match what you asked, so nothing was changed. The message lists what would make it possible — pick one. |
 
 ### Privacy & safety notes
 
