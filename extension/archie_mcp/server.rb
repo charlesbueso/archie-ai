@@ -148,6 +148,7 @@ module Archie
       when 'resize_opening'   then Edit.resize_opening(params)
       when 'set_slab_thickness' then Edit.set_slab_thickness(params)
       when 'make_unique'      then Edit.make_unique(params)
+      when 'merge_openings'   then Edit.merge_openings(params)
       when 'transform_component' then Edit.transform_component(params)
       when 'create_box'       then Create.box(params)
       when 'create_slab'      then Create.slab(params)

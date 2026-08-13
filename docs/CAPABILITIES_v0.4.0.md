@@ -127,3 +127,62 @@ New in v0.4.0: `make_unique`, `transform_component`, `create_box`,
   an uneditable ASSEMBLY. Carried over from v0.3.0; needs a live repro.
 - **Rotated walls in `resize_opening` / `create_opening`** — both assume
   axis-aligned walls. `create_wall` itself handles any orientation.
+
+---
+
+## v0.4.1 — root-level geometry, selection bridge, merge_openings
+
+Three fixes from a session on a downloaded `modern-house.skp`.
+
+### Archie was blind to loose geometry at the model root
+
+`Util.containers` only ever walked groups and component instances. That model
+keeps **658 faces loose at the model root**, including whole second-floor
+walls — none of it existed as far as Archie was concerned.
+
+The model root is now a pseudo-container (pid `0`, path `(model root)`), so
+the same detection code reaches it. On that house it made 3 previously
+invisible openings appear immediately.
+
+This is probably the single biggest coverage gap found so far: a model can be
+substantially invisible without any error being raised anywhere.
+
+### get_selection couldn't reach any editing tool
+
+Selecting a window in SketchUp yields loose `Face` entities. Every edit tool
+takes a container pid or an opening id, and `locate` rejected face pids
+outright — so *"resize the window I selected"*, the headline use case, could
+never work.
+
+`get_selection` now resolves each selected entity to its owning container
+(or reports it as loose root geometry) and returns `nearby_openings` — real
+opening ids next to the selection, ready for `resize_opening` or
+`merge_openings`. `locate` accepts any entity pid, not just containers.
+
+### merge_openings
+
+Combines adjacent openings into one by cutting away the mullions between
+them. Expressed as *"cut the gaps"* rather than *"delete this geometry"*, so
+it reuses the verified cut path and the schema stays closed — there is still
+no tool that deletes arbitrary geometry.
+
+Validates that the openings share a wall and a plane, overlap vertically, and
+aren't already contiguous; rolls back if they don't end up joined.
+
+### The case that still cannot be done, and why
+
+The two windows in question sit in a wall modelled as a **single plane of
+zero thickness** (`y = 7.1`, `n-extent [7.1, 7.1]`). There is no material
+between them to cut — the "3 bars" are simply adjacent faces. Merging them
+means *erasing faces*, which is deliberately outside the schema.
+
+Worth deciding explicitly, because surface-modelled walls are common in
+downloaded models and the whole opening model assumes solids with holes:
+
+1. Add a narrowly-scoped `erase_between_openings` that only removes faces
+   fully inside the gap rectangle of two named openings — bounded, and not a
+   general delete.
+2. Accept that surface-modelled walls are out of scope and say so clearly
+   when detected (current behaviour: the error explains exactly this).
+3. Treat it as a modelling problem and offer to rebuild that wall as a solid
+   with `create_wall` + `create_opening`, which are already verified.

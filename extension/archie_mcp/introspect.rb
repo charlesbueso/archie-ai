@@ -29,6 +29,7 @@ module Archie
       conts ||= Util.containers(model)
       out = []
       conts.each do |c|
+        next if c[:root] # the root pseudo-container is the whole model, not a slab
         bb = Util.world_bbox(c[:entity], c[:transform])
         dx, dy, dz = bb[:size]
         next unless dz < SLAB_MAX_THICK
@@ -119,7 +120,7 @@ module Archie
 
     def self.loops_of_container(cont)
       loops = []
-      cont[:entity].definition.entities.grep(Sketchup::Face).each do |f|
+      Util.ents_of(cont).grep(Sketchup::Face).each do |f|
         next if f.loops.length < 2
         n = f.normal.transform(cont[:transform])
         next if n.z.abs > 0.7 # horizontal face -> slab hole, not a wall opening
@@ -206,9 +207,11 @@ module Archie
     # Shared by list_openings and Edit.find_cluster so the two can never
     # disagree about kind (BUG-05).
     def self.openings_of(cont, ffls)
-      host = Util.world_bbox(cont[:entity], cont[:transform])
+      host = Util.cont_bbox(cont)
       host_span = host[:size].max
-      likely_furniture = host_span < HOST_MIN_SPAN
+      # the root pseudo-container is the whole model, so the furniture-size
+      # heuristic cannot apply to it
+      likely_furniture = !cont[:root] && host_span < HOST_MIN_SPAN
       cluster_loops(loops_of_container(cont)).map do |cl|
         prim = cl[:primary]
         ffl = ffl_for(prim[:z0], ffls)
@@ -306,22 +309,128 @@ module Archie
       result
     end
 
-    def self.get_selection(_params)
-      sel = Sketchup.active_model.selection
-      {
-        'count' => sel.count,
-        'items' => sel.to_a.first(40).map do |e|
-          h = { 'type' => e.class.name }
-          h['pid'] = e.persistent_id if e.respond_to?(:persistent_id)
-          h['name'] = e.name if e.respond_to?(:name) && !e.name.to_s.empty?
-          if e.respond_to?(:definition)
-            h['defn'] = e.definition.name
-            bb = Util.world_bbox(e, e.transformation)
-            h['min'] = bb[:min]; h['size'] = bb[:size]
-          end
-          h
+    # World bbox of any entity (faces and edges included, not just containers).
+    def self.entity_world_bbox(e, wtr)
+      pts = []
+      if e.respond_to?(:vertices)
+        e.vertices.each { |v| pts << v.position.transform(wtr) }
+      elsif e.respond_to?(:definition)
+        bb = e.definition.bounds
+        (0..7).each { |i| pts << bb.corner(i).transform(wtr * e.transformation) }
+      end
+      return nil if pts.empty?
+      xs = pts.map(&:x); ys = pts.map(&:y); zs = pts.map(&:z)
+      { min: [Util.to_m(xs.min), Util.to_m(ys.min), Util.to_m(zs.min)].map { |v| Util.r(v) },
+        max: [Util.to_m(xs.max), Util.to_m(ys.max), Util.to_m(zs.max)].map { |v| Util.r(v) },
+        size: [Util.to_m(xs.max - xs.min), Util.to_m(ys.max - ys.min),
+               Util.to_m(zs.max - zs.min)].map { |v| Util.r(v) } }
+    end
+
+    # Find ANY entity by pid — faces and edges included, at root or nested.
+    # Returns {entity:, transform:(world of its owner), owner:} or nil.
+    def self.find_any_entity(model, pid, conts = nil)
+      model.entities.each do |e|
+        if e.respond_to?(:persistent_id) && e.persistent_id == pid
+          return { entity: e, transform: Geom::Transformation.new, owner: nil }
         end
-      }
+      end
+      (conts || Util.containers(model)).each do |c|
+        Util.ents_of(c).each do |e|
+          if e.respond_to?(:persistent_id) && e.persistent_id == pid
+            return { entity: e, transform: c[:transform], owner: c }
+          end
+        end
+      end
+      nil
+    end
+
+    # Which container owns this entity, and with what world transform?
+    # Loose entities drawn at the model root have no owning container.
+    def self.owner_of(model, entity, conts = nil)
+      conts ||= Util.containers(model)
+      conts.find { |c| Util.ents_of(c).include?(entity) }
+    end
+
+    # get_selection is the bridge between "this thing I clicked" and every
+    # editing tool. Selecting a window in SketchUp gives you loose Faces, and
+    # the edit tools take container pids and opening ids — so without this
+    # resolution step, "resize the window I selected" can never work.
+    def self.get_selection(params)
+      model = Sketchup.active_model
+      sel = model.selection
+      conts = Util.containers(model)
+      slab_list = slabs(model, conts)
+      ffls = storeys(slab_list).map { |s| s['ffl_z'] }
+      want_openings = params.fetch('resolve_openings', true)
+
+      items = []
+      union = nil
+      sel.to_a.first(40).each do |e|
+        owner = (e.is_a?(Sketchup::Group) || e.is_a?(Sketchup::ComponentInstance)) ? nil : owner_of(model, e, conts)
+        wtr = owner ? owner[:transform] : Geom::Transformation.new
+        bb = entity_world_bbox(e, wtr)
+        h = { 'type' => e.class.name.split('::').last }
+        h['pid'] = e.persistent_id if e.respond_to?(:persistent_id)
+        h['name'] = e.name if e.respond_to?(:name) && !e.name.to_s.empty?
+        if e.is_a?(Sketchup::Group) || e.is_a?(Sketchup::ComponentInstance)
+          c = conts.find { |x| x[:pid] == e.persistent_id }
+          h['container_pid'] = e.persistent_id
+          h['container_path'] = c ? c[:path] : nil
+          h['shared'] = c ? c[:shared] : nil
+          h['defn'] = e.definition.name
+        elsif owner
+          h['container_pid'] = owner[:pid]
+          h['container_path'] = owner[:path]
+          h['shared'] = owner[:shared]
+        else
+          h['container_pid'] = nil
+          h['note'] = 'loose geometry at model root — not inside any group or component'
+        end
+        if bb
+          h['min'] = bb[:min]; h['size'] = bb[:size]
+          union = union ? [[union[0], bb[:min]].transpose.map(&:min),
+                           [union[1], bb[:max]].transpose.map(&:max)]
+                        : [bb[:min], bb[:max]]
+        end
+        items << h
+      end
+
+      out = { 'count' => sel.count, 'items' => items }
+      return out unless want_openings && union
+
+      # Which openings sit in or next to what the user picked? This is what
+      # turns a click into something resize_opening / merge_openings can take.
+      pad = 0.6
+      near = []
+      conts.each do |c|
+        cb = Util.cont_bbox(c)
+        next if cb[:max][0] < union[0][0] - pad || cb[:min][0] > union[1][0] + pad
+        next if cb[:max][1] < union[0][1] - pad || cb[:min][1] > union[1][1] + pad
+        next if cb[:max][2] < union[0][2] - pad || cb[:min][2] > union[1][2] + pad
+        openings_of(c, ffls).each do |o|
+          p = o[:cluster][:primary]
+          next if p[:w] < 0.15 || p[:h] < 0.15
+          cx = p[:cx]; cy = p[:cy]; cz = o[:cluster][:zc]
+          next if cx < union[0][0] - pad || cx > union[1][0] + pad
+          next if cy < union[0][1] - pad || cy > union[1][1] + pad
+          next if cz < union[0][2] - pad || cz > union[1][2] + pad
+          near << { 'id' => o[:id], 'kind' => o[:kind],
+                    'width' => Util.r(p[:w], 2), 'height' => Util.r(p[:h], 2),
+                    'sill_above_floor' => Util.r(p[:z0] - o[:ffl], 2),
+                    'container_pid' => o[:cont][:pid], 'shared' => o[:cont][:shared],
+                    'centre' => [Util.r(cx, 2), Util.r(cy, 2), Util.r(cz, 2)] }
+        end
+      end
+      near.sort_by! { |n| [n['centre'][0], n['centre'][1], n['centre'][2]] }
+      out['selection_bounds'] = { 'min' => union[0], 'max' => union[1] }
+      out['nearby_openings'] = near.first(20)
+      out['hint'] = if near.empty?
+                      'no openings near this selection'
+                    else
+                      "#{near.length} opening(s) next to the selection — these ids work " \
+                      'with resize_opening and merge_openings'
+                    end
+      out
     end
 
     # --- camera / selection helpers (DESIGN-03) ---------------------------
@@ -376,7 +485,31 @@ module Archie
         label = "opening #{opening_id} (#{near ? near[:kind] : '?'})"
       elsif pid && pid.to_i != 0
         cont = Util.find_container(model, pid.to_i)
-        raise "pid #{pid} not found" unless cont
+        unless cont
+          # A pid may name a Face or Edge, not a container — that is what a
+          # user's SketchUp selection actually consists of, so accept it.
+          loose = find_any_entity(model, pid.to_i)
+          raise "pid #{pid} not found in this model" unless loose
+          entity = loose[:entity]
+          bb = entity_world_bbox(entity, loose[:transform])
+          raise "pid #{pid} has no geometry to look at" unless bb
+          centre_m = [(bb[:min][0] + bb[:max][0]) / 2.0,
+                      (bb[:min][1] + bb[:max][1]) / 2.0,
+                      (bb[:min][2] + bb[:max][2]) / 2.0]
+          view.zoom([entity]) if zoom
+          if select
+            model.selection.clear
+            model.selection.add(entity)
+          end
+          view.refresh
+          return { 'located' => "#{entity.class.name.split('::').last} pid #{pid}" \
+                                "#{loose[:owner] ? " inside #{loose[:owner][:path]}" : ' (loose at model root)'}",
+                   'centre' => centre_m.map { |v| Util.r(v) },
+                   'container_pid' => loose[:owner] ? loose[:owner][:pid] : nil,
+                   'selected' => select, 'zoomed' => zoom,
+                   'note' => 'this is raw geometry, not a container — use get_selection ' \
+                             'to find the opening ids near it' }
+        end
         entity = cont[:entity]
         bb = Util.world_bbox(entity, cont[:transform])
         centre_m = [(bb[:min][0] + bb[:max][0]) / 2.0,

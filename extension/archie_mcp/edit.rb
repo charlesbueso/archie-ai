@@ -318,7 +318,7 @@ module Archie
         n: [rn0 - NORM_MARGIN, rn1 + NORM_MARGIN]
       }
 
-      shell = Util.world_bbox(cont[:entity], cont[:transform])
+      shell = Util.cont_bbox(cont)
       sh_lo = axis == 'x' ? shell[:min][0] : shell[:min][1]
       sh_hi = axis == 'x' ? shell[:max][0] : shell[:max][1]
       sz_lo = shell[:min][2]; sz_hi = shell[:max][2]
@@ -448,7 +448,7 @@ module Archie
       begin
         model.start_operation("Archie: resize opening #{width}x#{height}", true)
         op_open = true
-        cont[:entity].definition.entities.transform_by_vectors(
+        Util.ents_of(cont).transform_by_vectors(
           plan[:moves].map { |m| m[0] }, plan[:moves].map { |m| m[1] }
         )
         # BUG-02: verify while still inside the operation so a bad result can
@@ -475,6 +475,143 @@ module Archie
                                                      { zc: tc[2] }))
       rescue StandardError => e
         if op_open
+          model.abort_operation
+          Versioning.bump!
+        end
+        raise e
+      end
+    end
+
+    # Combine adjacent openings into one by cutting away the wall material
+    # (mullions) between them.
+    #
+    # Expressed as "cut the gaps" rather than "delete this geometry": it reuses
+    # the verified cut path, and it keeps the schema closed — there is still no
+    # tool that deletes arbitrary geometry.
+    def self.merge_openings(params)
+      model = Sketchup.active_model
+      ids = params.fetch('opening_ids')
+      raise 'merge_openings needs at least 2 opening_ids' if !ids.is_a?(Array) || ids.length < 2
+
+      pids = ids.map { |i| parse_id(i)[0] }.uniq
+      unless pids.length == 1
+        raise "all openings must live in the same wall (got container pids #{pids.inspect}). " \
+              'Merging across separate walls is not possible.'
+      end
+      cont, unique_report = editable_container(model, pids.first,
+                                               params.fetch('auto_unique', true))
+
+      slab_list = Introspect.slabs(model)
+      ffls = Introspect.storeys(slab_list).map { |s| s['ffl_z'] }
+      present = Introspect.openings_of(cont, ffls)
+
+      # match by world position, not pid: make_unique re-issues pids but does
+      # not move anything
+      targets = ids.map do |id|
+        _, cx, cy, cz = parse_id(id)
+        best = present.min_by do |o|
+          p = o[:cluster][:primary]
+          (p[:cx] - cx)**2 + (p[:cy] - cy)**2 + (o[:cluster][:zc] - cz)**2
+        end
+        d = if best
+              p = best[:cluster][:primary]
+              Math.sqrt((p[:cx] - cx)**2 + (p[:cy] - cy)**2 + (best[:cluster][:zc] - cz)**2)
+            else
+              1e9
+            end
+        raise "opening #{id} not found in this wall — re-run list_openings" if d > 0.5
+        best
+      end
+
+      axis = targets.first[:cluster][:axis]
+      unless targets.all? { |t| t[:cluster][:axis] == axis }
+        raise 'these openings are not on the same wall plane, so they cannot be merged'
+      end
+      h_axis = axis == 'x' ? 0 : 1
+      n_axis = 1 - h_axis
+
+      sorted = targets.sort_by { |t| t[:cluster][:primary][:h0] }
+      z0s = sorted.map { |t| t[:cluster][:primary][:z0] }
+      z1s = sorted.map { |t| t[:cluster][:primary][:z1] }
+      aligned = (z0s.max - z0s.min) < 0.03 && (z1s.max - z1s.min) < 0.03
+      z0 = aligned ? z0s.min : z0s.max
+      z1 = aligned ? z1s.max : z1s.min
+      if z1 - z0 < 0.05
+        raise 'these openings barely overlap vertically; merging them would leave a sliver. ' \
+              'Resize them to a common height first.'
+      end
+
+      gaps = []
+      sorted.each_cons(2) do |a, b|
+        g0 = a[:cluster][:primary][:h1]
+        g1 = b[:cluster][:primary][:h0]
+        gaps << [g0, g1] if g1 - g0 > 0.005
+      end
+      if gaps.empty?
+        raise 'these openings are already contiguous — nothing to remove between them'
+      end
+
+      span0 = sorted.first[:cluster][:primary][:h0]
+      span1 = sorted.last[:cluster][:primary][:h1]
+
+      # Derive the wall plane from the openings themselves rather than the
+      # container bbox — required at model root, where the "container" is the
+      # whole building and loose faces have no wall of their own.
+      plane_n = targets.map { |t| t[:cluster][:loops].map { |l| l[:n0] }.min }.min
+      far_n = targets.map { |t| t[:cluster][:loops].map { |l| l[:n1] }.max }.max
+      wall_thickness = far_n - plane_n
+      if wall_thickness < 0.01
+        raise 'these openings sit in a single-plane wall (zero thickness), so there is ' \
+              'no material to cut through. Merging would mean deleting the faces between ' \
+              'them, which no tool does yet — see docs.'
+      end
+
+      op = false
+      begin
+        model.start_operation("Archie: merge #{targets.length} openings", true)
+        op = true
+        gaps.each do |g0, g1|
+          unless Create.cut_rect(cont, h_axis, n_axis, g0, g1, z0, z1,
+                                 plane_n, wall_thickness)
+            model.abort_operation
+            op = false
+            Versioning.bump!
+            raise 'merge failed and was ROLLED BACK (wall unchanged): could not cut the ' \
+                  "strip between #{Util.r(g0, 2)} and #{Util.r(g1, 2)}."
+          end
+        end
+
+        fresh = Util.find_container(model, cont[:pid]) || cont
+        after = Introspect.openings_of(fresh, ffls)
+        merged = after.find do |o|
+          p = o[:cluster][:primary]
+          p[:h0] <= span0 + 0.03 && p[:h1] >= span1 - 0.03 &&
+            (p[:z0] - z0).abs < 0.05 && !o[:cluster][:assembly]
+        end
+        unless merged
+          model.abort_operation
+          op = false
+          Versioning.bump!
+          raise 'merge failed verification and was ROLLED BACK (wall unchanged): the ' \
+                'openings did not join into one. The wall may not be a clean solid.'
+        end
+        model.commit_operation
+        op = false
+        Versioning.bump!
+        mp = merged[:cluster][:primary]
+        out = {
+          'merged_count' => targets.length,
+          'mullions_removed' => gaps.length,
+          'mullion_widths' => gaps.map { |g0, g1| Util.r(g1 - g0, 3) },
+          'opening_id' => merged[:id], 'kind' => merged[:kind],
+          'width' => Util.r(mp[:w], 3), 'height' => Util.r(mp[:h], 3),
+          'sill_above_floor' => Util.r(mp[:z0] - merged[:ffl], 3),
+          'verified' => true
+        }
+        out['made_unique'] = unique_report if unique_report
+        out
+      rescue StandardError => e
+        if op
           model.abort_operation
           Versioning.bump!
         end

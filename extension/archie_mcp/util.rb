@@ -27,8 +27,32 @@ module Archie
     # definition would change every occurrence in the model, so Edit refuses
     # them. (The child's own count_instances alone misses the ancestor case —
     # the same child entity then appears at several world positions.)
+    ROOT_PID = 0
+
+    # The entities collection a container holds. The model root is exposed as
+    # a pseudo-container so loose geometry is reachable by the same code.
+    def self.ents_of(cont)
+      cont[:entities] || cont[:entity].definition.entities
+    end
+
+    # World bbox of a container, root included.
+    def self.cont_bbox(cont)
+      return world_bbox(cont[:entity], cont[:transform]) unless cont[:root]
+      bb = Sketchup.active_model.bounds
+      { min:  [to_m(bb.min.x), to_m(bb.min.y), to_m(bb.min.z)].map { |v| r(v) },
+        max:  [to_m(bb.max.x), to_m(bb.max.y), to_m(bb.max.z)].map { |v| r(v) },
+        size: [to_m(bb.width), to_m(bb.height), to_m(bb.depth)].map { |v| r(v) } }
+    end
+
+    # NOTE: the model ROOT is included as a pseudo-container (pid 0).
+    # Real models routinely keep whole walls as loose faces at root — one
+    # downloaded house had 658 of them — and a walker that only visits groups
+    # and components cannot see any of it. Root is never "shared", so it is
+    # always editable.
     def self.containers(model, max_depth = 8)
-      out = []
+      out = [{ pid: ROOT_PID, entity: nil, entities: model.entities,
+               transform: Geom::Transformation.new, path: '(model root)',
+               depth: -1, defn_name: '(root)', shared: false, root: true }]
       walk = nil
       walk = lambda do |ents, tr, depth, path, parent_shared|
         ents.each do |e|

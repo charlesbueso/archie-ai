@@ -41,6 +41,35 @@ module Archie
       grp
     end
 
+    # Cut a rectangular hole straight through a wall container.
+    # Shared by create_opening and merge_openings — merging is just cutting
+    # away the mullion strips between existing openings.
+    # h_axis = the wall's in-plane horizontal axis (0=x, 1=y); n_axis = its normal.
+    # face_n / thickness may be supplied explicitly — required for the model
+    # root, whose bbox is the whole building rather than one wall.
+    def self.cut_rect(cont, h_axis, n_axis, h0, h1, z0, z1, face_n = nil, thickness = nil)
+      if face_n.nil? || thickness.nil?
+        raise 'cut_rect needs an explicit plane for root-level geometry' if cont[:root]
+        bb = Util.world_bbox_live(cont[:entity], cont[:transform])
+        face_n ||= bb[:min][n_axis]
+        thickness ||= bb[:size][n_axis]
+      end
+      inv = cont[:transform].inverse
+      corners = [[h0, z0], [h1, z0], [h1, z1], [h0, z1]].map do |h, z|
+        w = [0.0, 0.0, 0.0]
+        w[h_axis] = h
+        w[n_axis] = face_n
+        w[2] = z
+        Util.pt(w, inv)
+      end
+      face = Util.ents_of(cont).add_face(corners)
+      return false if face.nil?
+      dir = Geom::Vector3d.new(n_axis.zero? ? 1 : 0, n_axis == 1 ? 1 : 0, 0)
+      depth = face.normal.dot(dir) > 0 ? -thickness : thickness
+      face.pushpull(Util.to_in(depth))
+      true
+    end
+
     def self.finish(model, grp, op_flag, expect_size, label)
       bb = Util.world_bbox_live(grp, grp.transformation)
       3.times do |i|
@@ -177,7 +206,11 @@ module Archie
       raise 'sill must be >= 0' if sill.negative?
 
       cont, unique_report = Edit.editable_container(model, pid, auto_unique)
-      bb = Util.world_bbox(cont[:entity], cont[:transform])
+      if cont[:root]
+        raise 'create_opening needs a specific wall container, not the model root. ' \
+              'Loose root geometry has no single wall to cut through.'
+      end
+      bb = Util.cont_bbox(cont)
       dx, dy, dz = bb[:size]
       raise "container #{pid} is not wall-like (no vertical extent)" if dz < 0.3
 
@@ -210,27 +243,13 @@ module Archie
       z0 = bb[:min][2] + sill
       z1 = z0 + height
 
-      # draw the cut on the wall's outer face, then push it right through
-      face_n = bb[:min][n_axis]
-      inv = cont[:transform].inverse
-      corners = [[h0, z0], [h1, z0], [h1, z1], [h0, z1]].map do |h, z|
-        w = [0.0, 0.0, 0.0]
-        w[h_axis] = h
-        w[n_axis] = face_n
-        w[2] = z
-        Util.pt(w, inv)
-      end
-
       op = false
       begin
         model.start_operation('Archie: create opening', true)
         op = true
-        face = cont[:entity].definition.entities.add_face(corners)
-        raise 'could not draw the opening outline on the wall face' if face.nil?
-        depth = face.normal.dot(
-          Geom::Vector3d.new(n_axis.zero? ? 1 : 0, n_axis == 1 ? 1 : 0, 0)
-        ) > 0 ? -thickness : thickness
-        face.pushpull(Util.to_in(depth))
+        unless cut_rect(cont, h_axis, n_axis, h0, h1, z0, z1)
+          raise 'could not draw the opening outline on the wall face'
+        end
 
         slab_list = Introspect.slabs(model)
         ffls = Introspect.storeys(slab_list).map { |s| s['ffl_z'] }
